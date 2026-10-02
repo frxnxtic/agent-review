@@ -79,7 +79,7 @@ export async function resolveWorkingBranch(
       message: `branch "${desired}" already exists — switch to it manually or pass a different name`,
     };
   }
-  if (options.autoCreateBranch && options.confirm) {
+  if (options.autoCreateBranch !== false && options.confirm) {
     if (await createBranch(projectRoot, desired)) {
       return { action: "created", branch: desired, fromProtected: true };
     }
