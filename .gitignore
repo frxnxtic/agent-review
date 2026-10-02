@@ -1,0 +1,8 @@
+node_modules/
+
+# Agent Review runtime data (session journal, checkpoints, snapshots).
+# config.json, change-package.json and review.md are committable artifacts.
+.agent-review/events.jsonl
+.agent-review/session.json
+.agent-review/checkpoints/
+.agent-review/snapshots/

@@ -1,0 +1,31 @@
+{
+  "name": "agent-review",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "OpenCode plugin and MCP server (Claude Code) that tracks AI agent work, records session facts locally, and builds a human-readable review package.",
+  "license": "AGPL-3.0",
+  "scripts": {
+    "test": "node --test --experimental-strip-types test/*.test.ts",
+    "test:integration": "node --test --experimental-strip-types test/integration.test.ts test/github-integration.test.ts",
+    "demo": "node --experimental-strip-types demo/run.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "bin": {
+    "agent-review": "bin/agent-review.js",
+    "agent-review-mcp": "bin/agent-review-mcp.js",
+    "agent-review-claude-hook": "bin/agent-review-claude-hook.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.0",
+    "@opencode-ai/plugin": "1.18.23"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.10",
+    "typescript": "^5.7.3"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/frxnxtic/agent-review.git"
+  }
+}
