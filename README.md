@@ -1,33 +1,78 @@
 # Agent Review
 
-OpenCode plugin that tracks AI agent work on a feature, records verifiable facts
-about the session locally, and builds a human-readable review package.
+**Local, verifiable review trails for AI coding agents.**
 
-The agent develops as usual; the plugin observes and records:
+When an AI agent builds a feature for you, the diff shows *what* changed but not
+*why*, which tests actually ran, or what risks the agent knew about. Agent
+Review records that evidence while the agent works and turns it into a review
+package you (and your reviewers) can trust:
 
-- a review **session** (task, branches, git state);
-- an append-only **event journal** (`events.jsonl`);
-- local **checkpoints** with restorable file snapshots;
-- structured **intents** (what changed, why, expected behavior, risk);
-- **test evidence** (command, exit code, duration, capped redacted output);
-- a machine-readable **Change Package** (`change-package.json`, `agent-review/v1`);
-- a human-readable **review.md** summary.
+- a review **session** bound to a task and a git branch;
+- an append-only **event journal** of edits and commands;
+- restorable **checkpoints** (file snapshots, never `git reset`);
+- structured **intents** per logical change: what, why, expected behavior,
+  risk, alternatives, limitations;
+- **test evidence**: exact command, exit code, duration, capped and redacted output;
+- a machine-readable **Change Package** (`change-package.json`, schema `agent-review/v1`)
+  and a human-readable **`review.md`**;
+- optional: a **GitHub Draft PR** with a summary and a few inline comments placed
+  on the exact diff lines they explain.
 
-Runs on plain Git. No new VCS, no GitHub App, no backend server.
+It runs on plain Git with no backend, no GitHub App and no extra VCS. Everything
+stays on your machine until you explicitly confirm a publish.
 
-## What it deliberately does NOT do (MVP limits)
+Works with **[OpenCode](https://opencode.ai)** (native plugin) and
+**[Claude Code](https://claude.com/claude-code)** (and any other MCP host) via
+an MCP stdio server.
 
-- No automatic push, merge, or PR creation; no GitHub comments.
-- No destructive git operations — no `reset --hard`, `clean`, force push, branch deletion.
-- No chain-of-thought recording — only structured explanations, observed facts,
-  command results, test results and statically computed risks.
-- Nothing leaves the machine; all data lives in `.agent-review/`.
-- The GitHub adapter (`src/github.ts`) is an honest stub that throws — future work.
+## Example output
+
+An excerpt of a generated `review.md` (from `npm run demo`):
+
+```markdown
+## Logical Changes
+
+### 1. refresh token rotation
+- What changed: added in `src/token.ts`
+- Why: refresh tokens were static; rotation limits replay windows
+- Expected behavior: every refresh rotates the token
+- Risk: medium
+
+## Test Evidence
+
+### Run 1
+- Command: `npm test`
+- Result: **passed** (exit code: 0)
+- Duration: 412 ms
+
+## Risks
+- Branch was created from protected branch "main".
+```
+
+## Safety model
+
+Agent Review is built to be safe to hand to an autonomous agent:
+
+- **No destructive git.** It never runs `reset --hard`, `clean`, force-push,
+  history rewrites or branch deletion. Rollback restores snapshotted files only,
+  after taking a safety checkpoint, and never deletes files.
+- **Confirmation gates.** Creating a branch from a protected branch
+  (`main`/`master`/`develop`), restoring a checkpoint, and every GitHub publish
+  require an explicit `confirm`/`confirmed: true` passed after the user agrees.
+  Without it the tools only return a preview.
+- **Evidence, not reasoning.** Only observed facts, explicit decisions, command
+  results and statically computed risks are recorded. No chain-of-thought.
+- **Redaction.** Tokens, keys and credentials are redacted before anything is
+  written to the journal or the package; test output is size-capped.
+- **No code leaves the machine** for comment generation; GitHub publishing goes
+  through your own authenticated `gh` CLI only.
+- **Restricted test runner.** `run_tests` takes a single command with no shell
+  metacharacters and rejects destructive programs.
 
 ## Install
 
-Requirements: OpenCode ≥ 1.18, Node ≥ 22.6 (tests only; the plugin itself runs
-inside OpenCode's embedded Bun runtime).
+Requirements: Git, Node ≥ 22.6, and for GitHub publishing the
+[GitHub CLI](https://cli.github.com) (`gh auth login`).
 
 ```bash
 git clone https://github.com/frxnxtic/agent-review.git
@@ -35,74 +80,127 @@ cd agent-review
 npm install
 ```
 
-## Connect to OpenCode
+### Claude Code (or any MCP host)
 
-Symlink the plugin entry into the project's plugin directory (file symlinks in
-`.opencode/plugins/` are loaded like regular plugin files):
+1. Register the MCP server in your project's `.mcp.json`:
+
+   ```json
+   {
+     "mcpServers": {
+       "agent-review": {
+         "command": "node",
+         "args": ["/abs/path/to/agent-review/bin/agent-review-mcp.js"]
+       }
+     }
+   }
+   ```
+
+2. Add the journaling hook to `.claude/settings.json`. It records edits and
+   shell commands, but only while a review session is active:
+
+   ```json
+   {
+     "hooks": {
+       "PostToolUse": [
+         {
+           "matcher": "Edit|Write|MultiEdit|NotebookEdit|Bash",
+           "hooks": [
+             { "type": "command", "command": "node /abs/path/to/agent-review/bin/agent-review-claude-hook.js", "timeout": 10 }
+           ]
+         }
+       ]
+     }
+   }
+   ```
+
+3. Add the skill that teaches the agent the workflow:
+
+   ```bash
+   mkdir -p .claude/skills
+   ln -s /abs/path/to/agent-review/skills/agent-review .claude/skills/agent-review
+   ```
+
+4. Restart Claude Code. The tools appear as `mcp__agent-review__agent_review_*`.
+
+The project root is resolved from `AGENT_REVIEW_PROJECT_ROOT`, then
+`CLAUDE_PROJECT_DIR`, then the server's working directory.
+
+### OpenCode
+
+Symlink the plugin and the skill into your project (file symlinks in
+`.opencode/plugins/` load like regular plugin files), then restart OpenCode:
 
 ```bash
-ln -s "$PWD/src/plugin.ts" /path/to/your-project/.opencode/plugins/agent-review.ts
-ln -s "$PWD/skills/agent-review" /path/to/your-project/.opencode/skills/agent-review
+ln -s /abs/path/to/agent-review/src/plugin.ts .opencode/plugins/agent-review.ts
+ln -s /abs/path/to/agent-review/skills/agent-review .opencode/skills/agent-review
 ```
 
-Restart OpenCode — the plugin loads automatically at startup and registers seven
-tools: `agent_review_start`, `agent_review_checkpoint`,
-`agent_review_record_intent`, `agent_review_run_tests`,
-`agent_review_build_package`, `agent_review_status`, `agent_review_rollback`.
+The plugin journals file edits and tool calls through OpenCode's own hooks.
 
-The skill (`.opencode/skills/agent-review/SKILL.md`) teaches the agent when and
-how to call them.
+## Tools
 
-## Connect to Claude Code
+| Tool | What it does | Side effects |
+|------|--------------|--------------|
+| `agent_review_start` | Start a session for a task; propose an `agent/<slug>` branch when on a protected branch | Creates a branch only with `confirm: true` |
+| `agent_review_checkpoint` | Record HEAD, status, changed files and a restorable snapshot | Local only |
+| `agent_review_record_intent` | Record one logical change: entity, files, kind, reason, expected behavior, risk, alternatives, limitations | Local only |
+| `agent_review_run_tests` | Run one explicit test command and store the evidence | Runs the command |
+| `agent_review_build_package` | Write `change-package.json` and `review.md`; ends the session unless `keepActive: true` | Local only |
+| `agent_review_status` | Show the session state and counts | Read-only |
+| `agent_review_rollback` | List checkpoints, or restore one with `confirm: true` | Restores snapshotted files |
+| `agent_review_github_status` | Check `gh` availability and auth, remote, branches, existing PR | Read-only |
+| `agent_review_prepare_pr` | Build the PR body and inline-comment preview under `.agent-review/github/` | Local only |
+| `agent_review_publish_pr` | Commit (opt-in), push, open a Draft PR, post the grouped review | **External**, only with `confirmed: true` |
+| `agent_review_update_github_review` | After a new push, replace only Agent Review's own PR comments | **External**, only with `confirmed: true` |
 
-The same tools are exposed by an MCP stdio server (`src/mcp.ts`), and a
-`PostToolUse` hook (`src/claude-hook.ts`) replaces the plugin's journaling hooks.
-Run `npm install` here first (adds `@modelcontextprotocol/sdk`), then in the host
-project:
+## Typical workflow
+
+1. **Start**: `agent_review_start { task }`. On a protected branch the tool
+   proposes a branch name; after the user approves, call again with
+   `confirm: true`. A dirty working tree is recorded as a risk, never reset.
+2. **Work.** Take checkpoints before risky edits, and call
+   `agent_review_record_intent` once per logical change.
+3. **Test**: `agent_review_run_tests { command: "npm test", reason }`.
+4. **Build**: `agent_review_build_package`, then read `.agent-review/review.md`.
+5. **Optional PR**: `agent_review_prepare_pr`, show the preview to the user,
+   then `agent_review_publish_pr { confirmed: true, allowPush: true }`.
+
+Tip: if your working tree contains unrelated changes, commit your feature
+yourself and publish with `allowCommit: false`. The tool's own commit step
+stages everything (`git add -A`).
+
+## GitHub Draft PR reviews
+
+Enable publishing in `.agent-review/config.json` (`"github": { "enabled": true }`).
+With it disabled, `status` and `prepare-pr` still work and publishing fails.
+
+- **Draft PRs only** by default. It never merges, never changes the base branch,
+  never assigns reviewers or labels, and reuses an existing open PR instead of
+  creating a duplicate.
+- **Inline comments** attach only to added lines of the current PR diff, at most
+  one per logical change, capped by `maxInlineComments` (default 8). They skip
+  generated files, lockfiles and formatting-only changes. A change with no
+  mappable line becomes a note in the PR body; the mapper never guesses.
+- **Updates are surgical.** Each comment carries a hidden marker
+  (`agent-review:session=…;change=…`); after a new push, only Agent Review's own
+  comments are replaced. Human and other-bot comments are never touched.
+- The summary and comments are **review context, not guarantees of correctness**.
+
+Manual end-to-end test guide: [docs/manual-github-test.md](docs/manual-github-test.md).
+
+## CLI
+
+The GitHub workflow is also available from the shell (run from your project
+directory):
 
 ```bash
-mkdir -p .claude/skills
-ln -s "$PWD/skills/agent-review" /path/to/your-project/.claude/skills/agent-review
+node /abs/path/to/agent-review/bin/agent-review.js github status [--base main]
+node /abs/path/to/agent-review/bin/agent-review.js github prepare-pr [--base main] [--max 8]
+node /abs/path/to/agent-review/bin/agent-review.js github publish-pr [--allow-commit] [--allow-push] [--no-draft] --confirm
+node /abs/path/to/agent-review/bin/agent-review.js github update-review [--pr <n>] --confirm
 ```
 
-`.mcp.json` in the host project:
-
-```json
-{ "mcpServers": { "agent-review": { "command": "node", "args": ["/abs/path/agent-review/bin/agent-review-mcp.js"] } } }
-```
-
-`.claude/settings.json` hook (journals Edit/Write/Bash while a session is active):
-
-```json
-{ "hooks": { "PostToolUse": [ { "matcher": "Edit|Write|MultiEdit|NotebookEdit|Bash",
-  "hooks": [ { "type": "command", "command": "node /abs/path/agent-review/bin/agent-review-claude-hook.js" } ] } ] } }
-```
-
-The project root is `AGENT_REVIEW_PROJECT_ROOT`, else `CLAUDE_PROJECT_DIR`, else
-the process cwd. In Claude Code the tools are named
-`mcp__agent-review__agent_review_*`.
-
-## Usage (typical arc)
-
-1. **Start**: `agent_review_start { task }`.
-   On a protected branch (`main`/`master`/`develop`) the tool answers
-   `confirmation-required` with a proposed `agent/<task-slug>` branch; after the
-   user approves, re-invoke with `confirm: true`. A dirty working tree is
-   recorded and warned about — never reset.
-2. **Checkpoint**: `agent_review_checkpoint { reason }` — HEAD, status, changed
-   files and a restorable snapshot under `.agent-review/snapshots/`.
-3. **Record intent**: `agent_review_record_intent { entity, files, changeKind,
-   reason, expectedBehavior, risk, alternatives, limitations }`.
-4. **Tests**: `agent_review_run_tests { command, reason }` — single command, no
-   shell metacharacters, destructive programs rejected, output capped and
-   redacted.
-5. **Build**: `agent_review_build_package { includeDiff? }` — writes
-   `.agent-review/change-package.json` and `.agent-review/review.md`, and
-   finalizes the session (pass `keepActive: true` to keep it open).
-6. **Status / Rollback**: `agent_review_status` anytime;
-   `agent_review_rollback` lists checkpoints, and restoring a chosen one
-   requires `confirm: true`, takes a safety checkpoint first, restores only the
-   snapshotted files, and never deletes anything.
+Nothing is published without `--confirm`.
 
 ## Where data lives
 
@@ -111,59 +209,60 @@ the process cwd. In Claude Code the tools are named
 ├── config.json          # committable configuration
 ├── change-package.json  # committable review artifact
 ├── review.md            # committable review summary
+├── github/              # committable PR preview artifacts
 ├── events.jsonl         # gitignored journal (append-only)
 ├── session.json         # gitignored current/last session
 ├── checkpoints/         # gitignored checkpoint metadata
 └── snapshots/           # gitignored file snapshots
 ```
 
-Commit `config.json`, `change-package.json` and `review.md` when you want the
-review trail in git; the journal and snapshots stay local. Host projects should
-gitignore the runtime files (see this repo's `.gitignore`).
+Add the runtime files to your project's `.gitignore`:
 
-## GitHub Draft PR Reviews
+```gitignore
+/.agent-review/events.jsonl
+/.agent-review/session.json
+/.agent-review/checkpoints/
+/.agent-review/snapshots/
+```
 
-MVP stage 3 adds an opt-in GitHub adapter (`GhCliGitHubAdapter`, `src/github/`)
-that turns a built Change Package into a Draft PR with a readable summary and a
-small number of inline comments on meaningful diff lines.
+## Configuration
 
-- **Disabled by default** — enable in `.agent-review/config.json`:
-  `"github": { "enabled": true }`. With it disabled, `status`/`prepare-pr`
-  stay available (read-only / local-only); publishing hard-fails.
-- **Needs the GitHub CLI** — the adapter shells out to `gh` only (no REST
-  client, no tokens in the plugin). Run `gh auth login` first; if gh is missing
-  or unauthenticated the tools fail safely with
-  «Для публикации PR выполните: gh auth login» and keep all local artifacts.
-- **Publishing always requires confirmation** — `agent_review_publish_pr`
-  performs nothing unless `confirmed: true` was passed after an explicit user
-  approval; the same applies to `agent_review_update_github_review`.
-- The plugin creates ordinary branches, commits and **Draft PRs**; it never
-  force-pushes, never rewrites history, never merges, never changes the base
-  branch, never auto-assigns reviewers or labels, and never duplicates an
-  existing open PR for the branch.
-- Inline comments attach **only to lines of the current PR diff** (added lines,
-  RIGHT side), capped at `maxInlineComments` (default 8), never on generated
-  files, lockfiles or formatting-only changes, never more than one per logical
-  change. Changes without a mappable diff line become a file-level note in the
-  PR body instead — the mapper never guesses.
-- Comments carry a hidden HTML marker (`agent-review:session=…;change=…`).
-  After a new push, the update workflow replaces **only the plugin's own**
-  comments (config `updateMode: "replace-agent-comments"`); human and
-  other-bot comments are never touched.
-- The PR summary and inline comments are review **CONTEXT, not guarantees of
-  correctness**. No source code is sent to any external LLM/API for comment
-  generation; all captured output passes the existing redaction before any
-  artifact is written, and credentials never land in `events.jsonl`,
-  `session.json`, `review.md` or `change-package.json`.
-- CLI: `agent-review github status | prepare-pr | publish-pr | update-review`
-  (see `bin/agent-review.js`; `--confirm` required for publishing).
-- Manual test guide: [docs/manual-github-test.md](docs/manual-github-test.md).
+`.agent-review/config.json` is created on first use:
 
-## Tests
+| Key | Default | Meaning |
+|-----|---------|---------|
+| `protectedBranches` | `["main","master","develop"]` | Branches that need confirmation before branching off |
+| `branchPrefix` | `"agent/"` | Prefix for proposed branch names |
+| `maxCapturedOutputBytes` | `10240` | Cap on stored test output |
+| `maxDiffBytesPerFile` | `20480` | Cap on per-file diff embedded in the package |
+| `includeDiffInPackageByDefault` | `true` | Embed the diff into `change-package.json` |
+| `redactionEnabled` | `true` | Redact secrets before writing anything |
+| `github.enabled` | `false` | Allow publishing |
+| `github.maxInlineComments` | `8` | Inline comment cap per PR |
+| `github.updateMode` | `"replace-agent-comments"` | How updates treat previous comments |
+
+## Limitations
+
+- Snapshots cover only files that were changed at checkpoint time.
+- Symbol extraction is regex-based, not AST-based.
+- The Change Package reflects the working tree, so uncommitted unrelated changes
+  are counted; the dirty state at session start is recorded as a risk.
+- Automatic journaling depends on host hooks (OpenCode plugin hooks, Claude Code
+  `PostToolUse`); other MCP hosts get the tools without automatic journaling.
+
+## Development
 
 ```bash
 npm run typecheck         # tsc --noEmit
 npm test                  # unit + mock-integration tests (node --test)
 npm run test:integration  # full local arc + mock-GitHub publish arc
-npm run demo              # same arc as a demo project, prints review.md
+npm run demo              # runs a demo arc and prints review.md
 ```
+
+Domain logic lives in `src/*.ts`. The host adapters are `src/plugin.ts`
+(OpenCode), `src/mcp.ts` (MCP server) and `src/claude-hook.ts` (Claude Code
+hook), all built on the shared handlers in `src/handlers.ts`.
+
+## License
+
+[AGPL-3.0](LICENSE)
